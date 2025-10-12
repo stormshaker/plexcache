@@ -307,6 +307,17 @@ if [ "$MOVE_BACK" = "1" ]; then
       if [ "$s" = "$d" ]; then
         log_debug "  Verify OK, removing cache copy"
         rm -f -- "$cache_src"
+        # Also remove sidecars if they were moved back
+        if [ "$(to_bool "${PLEXCACHE_MOVE_BACK_SIDECARS:-true}")" = "1" ]; then
+          base="${cache_src%.*}"
+          for ext in srt ass sub nfo jpg png; do
+            sc="${base}.${ext}"
+            if [ -f "$sc" ]; then
+              log_debug "  Removing sidecar from cache: $(basename "$sc")"
+              rm -f -- "$sc"
+            fi
+          done
+        fi
       else
         log_warn "  Verify failed, keeping cache copy: $cache_src"
       fi
