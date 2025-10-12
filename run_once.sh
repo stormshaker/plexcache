@@ -330,24 +330,64 @@ if [ "$MOVE_BACK" = "1" ]; then
     log_info "Checking for orphaned sidecar files on cache..."
     ORPHAN_COUNT=0
     
-    # Build list of video library paths on cache to search
-    # Use the library names from PLEX_LIBRARIES if set, otherwise search common paths
+    # Query Plex database for actual library root paths, then map to cache
     SEARCH_PATHS=()
-    if [ -n "${PLEX_LIBRARIES:-}" ]; then
-      IFS=',' read -ra LIBS <<< "$PLEX_LIBRARIES"
-      for lib in "${LIBS[@]}"; do
-        lib_trimmed="$(echo "$lib" | xargs)"  # trim whitespace
-        # Common Plex library path patterns
-        for base_path in "video/$lib_trimmed" "$lib_trimmed"; do
-          search_path="${CACHE_ROOT}/${base_path}"
-          if [ -d "$search_path" ]; then
-            SEARCH_PATHS+=("$search_path")
-          fi
-        done
-      done
-    fi
+    LIBRARY_PATHS=$(python3 -c "
+import os
+import sys
+import sqlite3
+
+plexdb_root = os.environ.get('PLEXCACHE_PLEXDB_PATH', '/plexdb')
+db_path = os.path.join(plexdb_root, 'Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db')
+
+if not os.path.exists(db_path):
+    sys.exit(0)
+
+conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+cursor = conn.cursor()
+
+# Get library root paths for movie and TV libraries
+cursor.execute('''
+    SELECT DISTINCT sl.root_path
+    FROM section_locations sl
+    JOIN library_sections ls ON sl.library_section_id = ls.id
+    WHERE ls.section_type IN (1, 2)
+''')
+
+paths = [row[0] for row in cursor.fetchall()]
+conn.close()
+
+# Apply path mapping (PLEX_PATH_MAP)
+path_map = os.environ.get('PLEX_PATH_MAP', '')
+for path in paths:
+    mapped_path = path
+    for pair in path_map.split(','):
+        pair = pair.strip()
+        if not pair or '=' not in pair:
+            continue
+        src, dst = pair.split('=', 1)
+        src = src.rstrip('/')
+        dst = dst.rstrip('/')
+        if src and mapped_path.startswith(src + '/'):
+            mapped_path = mapped_path.replace(src, dst, 1)
+            break
     
-    # If no libraries configured or paths not found, skip orphan cleanup
+    # Convert array path to cache path
+    array_root = os.environ.get('PLEXCACHE_ARRAY_ROOT', '/mnt/user0')
+    cache_root = os.environ.get('PLEXCACHE_CACHE_ROOT', '/mnt/cache')
+    cache_path = mapped_path.replace(array_root, cache_root, 1)
+    
+    print(cache_path)
+" 2>> "$LOG" || true)
+    
+    # Build array of search paths
+    while IFS= read -r cache_path; do
+      if [ -n "$cache_path" ] && [ -d "$cache_path" ]; then
+        SEARCH_PATHS+=("$cache_path")
+      fi
+    done <<< "$LIBRARY_PATHS"
+    
+    # If no paths found, skip orphan cleanup
     if [ ${#SEARCH_PATHS[@]} -eq 0 ]; then
       log_debug "No video library paths found on cache, skipping orphan sidecar cleanup"
     else
