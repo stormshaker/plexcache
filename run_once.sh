@@ -85,8 +85,6 @@ RSYNC_CMD=(rsync -ahvW --inplace --partial --numeric-ids --xattrs --acls)
 RSYNC_CMD+=(--chown=${PUID}:${PGID})
 [ "$DRY" = "1" ] && RSYNC_CMD+=(--dry-run)
 
-#base mkdir cmd
-MKDIR_CMD=(install -d -m 0775 -o "${PUID}" -g "${PGID}")
 
 # -------------------------------
 # Build the selection list (paths)
@@ -218,8 +216,11 @@ for rec in "${PICKED[@]}"; do
     continue
   fi
 
-  # create dest dir even in dry so rsync can resolve it
-  "${MKDIR_CMD[@]}" "$(dirname "$dst")"
+  # create dest dir tree with correct ownership
+  dst_dir="$(dirname "$dst")"
+  mkdir -p "$dst_dir"
+  chown -R ${PUID}:${PGID} "$dst_dir"
+  chmod -R 775 "$dst_dir"
 
   log_info "Copy: $(basename "$src")"
   log_debug "  $(echo "${RSYNC_CMD[*]}" | tr '\n' ' ') '$src' '$dst'"
@@ -278,7 +279,11 @@ if [ "$MOVE_BACK" = "1" ]; then
   for cache_src in $BACK_LIST; do
     [ -z "$cache_src" ] && continue
     array_dst="${cache_src/$CACHE_ROOT/$ARRAY_ROOT}"
-    "${MKDIR_CMD[@]}" "$(dirname "$array_dst")"
+    # create dest dir tree with correct ownership
+    array_dir="$(dirname "$array_dst")"
+    mkdir -p "$array_dir"
+    chown -R ${PUID}:${PGID} "$array_dir"
+    chmod -R 775 "$array_dir"
 
     log_info "Move back: $(basename "$cache_src")"
     log_debug "  $(echo "${RSYNC_CMD[*]}" | tr '\n' ' ') '$cache_src' '$array_dst'"
