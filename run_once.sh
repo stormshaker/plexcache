@@ -8,9 +8,15 @@ PUID="${PUID:-99}"
 PGID="${PGID:-100}"
 umask 0002
 
-# mirror stdout+stderr to log and terminal
+# setup logging with rotation
 mkdir -p "$(dirname "$LOG")"
-exec > >(tee -a "$LOG") 2>&1
+# Rotate log on startup with timestamp
+if [ -f "$LOG" ]; then
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    # Copy to timestamped backup and truncate original (preserves open file handles)
+    cp "$LOG" "${LOG}.${TIMESTAMP}"
+    > "$LOG"  # truncate the original file
+fi
 
 to_bool() {
   case "${1:-}" in
@@ -20,13 +26,59 @@ to_bool() {
   esac
 }
 
+# Logging levels: error=0, warn=1, info=2, debug=3
+LOG_LEVEL="${PLEXCACHE_LOG_LEVEL:-info}"
+case "${LOG_LEVEL,,}" in
+  error) LOG_LEVEL_NUM=0 ;;
+  warn|warning) LOG_LEVEL_NUM=1 ;;
+  info) LOG_LEVEL_NUM=2 ;;
+  debug) LOG_LEVEL_NUM=3 ;;
+  *) LOG_LEVEL_NUM=2 ;;  # default to info
+esac
+
+log_error() { echo "[ERROR] $*" >> "$LOG"; }
+log_warn()  { [ "$LOG_LEVEL_NUM" -ge 1 ] && echo "[WARN] $*" >> "$LOG" || true; }
+log_info()  { [ "$LOG_LEVEL_NUM" -ge 2 ] && echo "[INFO] $*" >> "$LOG" || true; }
+log_debug() { [ "$LOG_LEVEL_NUM" -ge 3 ] && echo "[DEBUG] $*" >> "$LOG" || true; }
+
+# Startup summary function (can be called from entrypoint.sh too)
+startup_summary() {
+  echo "[plexcache] ==============================================="
+  echo "[plexcache] PlexCache run started: $(date)"
+  echo "[plexcache] Log level: ${LOG_LEVEL:-info}"
+  echo "[plexcache] Detailed logs: ${LOG:-/logs/plexcache.log}"
+  echo "[plexcache] Dry run: ${DRY:-0} | Move warm: ${WARM_MOVE:-1} | Move back: ${MOVE_BACK:-0}"
+  echo "[plexcache] Array: ${ARRAY_ROOT:-/mnt/user0} | Cache: ${CACHE_ROOT:-/mnt/cache}"
+  echo "[plexcache] ==============================================="
+}
+
+# Completion summary function (can be called from entrypoint.sh too)
+completion_summary() {
+  local copied_count="${1:-0}"
+  local moved_count="${2:-0}"
+  local back_count="${3:-0}"
+  
+  if [ "$back_count" -gt 0 ]; then
+    echo "[plexcache] Warm/copy phase complete: $copied_count copied"
+    echo "[plexcache] Move-back phase complete: $back_count items moved back to array"
+  elif [ "$moved_count" -gt 0 ]; then
+    echo "[plexcache] Warm/copy phase complete: $copied_count copied ($moved_count moved - source deleted after verify)"
+  else
+    echo "[plexcache] Warm/copy phase complete: $copied_count copied"
+  fi
+  echo "[plexcache] ==============================================="
+  echo "[plexcache] PlexCache run ended: $(date)"
+  echo "[plexcache] ==============================================="
+}
+
 DRY="$(to_bool "${RSYNC_DRY_RUN:-}")"
 WARM_MOVE="$(to_bool "${PLEXCACHE_WARM_MOVE:-true}")"             # <<— new: move during warm by default
 WARM_SIDECARS="$(to_bool "${PLEXCACHE_WARM_SIDECARS:-true}")"     # <<— copy/move sidecars with media
 SKIP_IF_PLAYING_WARM="$(to_bool "${PLEXCACHE_SKIP_IF_PLAYING_WARM:-true}")"
+MOVE_BACK="$(to_bool "${PLEXCACHE_MOVE_WATCHED_BACK:-false}")"    # <<— move watched items back to array
 
-echo "[plexcache] run start $(date)"
-echo "[plexcache] DRY mode: $DRY  move_warm: $WARM_MOVE  array=$ARRAY_ROOT  cache=$CACHE_ROOT"
+# Output startup summary to log file only
+startup_summary >> "$LOG"
 
 # base rsync cmd
 RSYNC_CMD=(rsync -ahvW --inplace --partial --numeric-ids --xattrs --acls)
@@ -39,11 +91,11 @@ MKDIR_CMD=(install -d -m 0775 -o "${PUID}" -g "${PGID}")
 # -------------------------------
 # Build the selection list (paths)
 # -------------------------------
-LIST_CMD='python /opt/plexcache/selector.py'
+LIST_CMD='python /opt/plexcache/selector_sqlite.py'
 if id -u abc >/dev/null 2>&1; then
-  LIST_OUT="$(su abc -s /bin/sh -c "$LIST_CMD" || true)"
+  LIST_OUT="$(su abc -s /bin/sh -c "$LIST_CMD" 2>> "$LOG" || true)"
 else
-  LIST_OUT="$(bash -lc "$LIST_CMD" || true)"
+  LIST_OUT="$(bash -lc "$LIST_CMD" 2>> "$LOG" || true)"
 fi
 
 # Optional: build a set of currently playing files to avoid moving out from under a stream
@@ -75,14 +127,21 @@ KEEP_FREE_GB="${PLEXCACHE_MIN_FREE_GB:-20}"
 TRIM_PLAN="$(to_bool "${PLEXCACHE_TRIM_PLAN:-true}")"
 
 # Collect existing sources with sizes first
+log_info "Building file list from selector..."
 declare -a ALL=()
 TOTAL_NEED=0
 while IFS= read -r src; do
   [ -z "$src" ] && continue
-  [[ "$src" != "$ARRAY_ROOT"/* ]] && { echo "[skip] not under array root: $src"; continue; }
-  [[ "$src" == "$CACHE_ROOT"/* ]] && { echo "[skip] already on cache: $src"; continue; }
+  if [[ "$src" != "$ARRAY_ROOT"/* ]]; then
+    log_debug "Skip (not under array root): $src"
+    continue
+  fi
+  if [[ "$src" == "$CACHE_ROOT"/* ]]; then
+    log_debug "Skip (already on cache): $src"
+    continue
+  fi
   if [ -n "$PLAYING_SET" ] && grep -Fqx "$src" <(printf "%s\n" $PLAYING_SET); then
-    echo "[skip] playing: $src"
+    log_debug "Skip (currently playing): $src"
     continue
   fi
 
@@ -90,14 +149,15 @@ while IFS= read -r src; do
     # if the same file already exists on cache, it's already warm
     cache_equiv="${src/$ARRAY_ROOT/$CACHE_ROOT}"
     if [ -f "$cache_equiv" ]; then
-      echo "[skip] already on cache: $cache_equiv"
+      log_debug "Skip (already on cache): $cache_equiv"
       continue
     fi
-    echo "[skip] missing on array: $src"
+    log_debug "Skip (missing on array): $src"
     continue
   fi
 
   size=$(stat -c%s "$src" 2>/dev/null || stat -f%z "$src" 2>/dev/null || echo 0)
+  log_debug "Add to plan: $src ($(numfmt --to=iec $size))"
   ALL+=("$src|$size")
   TOTAL_NEED=$((TOTAL_NEED + size))
 done < <(printf "%s\n" "$LIST_OUT")
@@ -106,51 +166,65 @@ FREE=$(df -PB1 "$CACHE_ROOT" | awk 'NR==2{print $4}')
 RESERVE=$(( (RESERVE_GB + KEEP_FREE_GB) * 1024 * 1024 * 1024 ))
 ALLOW=$(( FREE - RESERVE ))
 
-echo "[plexcache] cache free=$(numfmt --to=iec $FREE) need=$(numfmt --to=iec $TOTAL_NEED) allow-after-reserve=$(numfmt --to=iec $ALLOW)"
+log_info "Space analysis:"
+log_info "  Cache free: $(numfmt --to=iec $FREE)"
+log_info "  Total needed: $(numfmt --to=iec $TOTAL_NEED)"
+log_info "  Available after reserve: $(numfmt --to=iec $ALLOW)"
 
 if [ "$ALLOW" -le 0 ]; then
-  echo "[plexcache] not enough free space even before copying. aborting."
-  echo "[plexcache] run end   $(date)"; exit 0
+  log_warn "Not enough free space even before copying. Aborting."
+  log_info "PlexCache run ended: $(date)"
+  exit 0
 fi
 
 # Trim plan to what fits (or abort if trimming disabled)
+log_info "Planning copy operations..."
 declare -a PICKED=()
 ACC=0
+SKIPPED_COUNT=0
 for rec in "${ALL[@]}"; do
   src="${rec%%|*}"; size="${rec##*|}"
   if [ $((ACC + size)) -le "$ALLOW" ]; then
     PICKED+=("$rec"); ACC=$((ACC + size))
   else
     if [ "$TRIM_PLAN" = "1" ]; then
-      echo "[skip] out of space for: $src"
+      log_debug "Skip (out of space): $src"
+      SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
       continue
     else
-      echo "[plexcache] plan exceeds cache allowance. aborting."
-      echo "[plexcache] run end   $(date)"; exit 0
+      log_warn "Plan exceeds cache allowance. Aborting."
+      log_info "PlexCache run ended: $(date)"
+      exit 0
     fi
   fi
 done
-echo "[plexcache] will copy $((${#PICKED[@]})) items, total $(numfmt --to=iec $ACC)"
+log_info "Plan ready: ${#PICKED[@]} items will be copied ($(numfmt --to=iec $ACC))"
+[ "$SKIPPED_COUNT" -gt 0 ] && log_info "  ($SKIPPED_COUNT items skipped due to space constraints)"
 
 # ----------------
 # Copy loop (warm)
 # ----------------
+log_info "Starting warm/copy phase..."
 IFS=$'\n'
+COPIED_COUNT=0
+MOVED_COUNT=0
 for rec in "${PICKED[@]}"; do
   src="${rec%%|*}"
   dst="${src/$ARRAY_ROOT/$CACHE_ROOT}"
 
   # if the array source is gone but the cache copy exists, skip quietly
   if [ ! -f "$src" ] && [ -f "$dst" ]; then
-    echo "[skip] already on cache: $dst"
+    log_debug "Skip (already on cache): $dst"
     continue
   fi
 
   # create dest dir even in dry so rsync can resolve it
   "${MKDIR_CMD[@]}" "$(dirname "$dst")"
 
-  echo "[rsync] ${RSYNC_CMD[*]} '$src' '$dst'"
+  log_info "Copy: $(basename "$src")"
+  log_debug "  $(echo "${RSYNC_CMD[*]}" | tr '\n' ' ') '$src' '$dst'"
   "${RSYNC_CMD[@]}" "$src" "$dst"
+  COPIED_COUNT=$((COPIED_COUNT + 1))
 
   # sidecars during warm
   if [ "$WARM_SIDECARS" = "1" ]; then
@@ -160,6 +234,7 @@ for rec in "${PICKED[@]}"; do
       sc_src="${base}.${ext}"
       [ -f "$sc_src" ] || continue
       sc_dst="${db}/$(basename "$sc_src")"
+      log_debug "  Copy sidecar: $(basename "$sc_src")"
       "${RSYNC_CMD[@]}" "$sc_src" "$sc_dst"
     done
   fi
@@ -169,48 +244,71 @@ for rec in "${PICKED[@]}"; do
     src_sz=$(stat -c%s "$src" 2>/dev/null || stat -f%z "$src")
     dst_sz=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst" || echo 0)
     if [ "$src_sz" = "$dst_sz" ]; then
+      log_debug "  Verify OK, removing source"
       rm -f -- "$src"
+      MOVED_COUNT=$((MOVED_COUNT + 1))
       # try to tidy empty dir on array (non-fatal)
       rdir="$(dirname "$src")"
       rmdir --ignore-fail-on-non-empty "$rdir" 2>/dev/null || true
     else
       # fall back to checksum pass once, then re-check
+      log_debug "  Size mismatch, verifying with checksum"
       rsync -ahvW --checksum "$src" "$dst"
       dst_sz2=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst" || echo 0)
-      [ "$src_sz" = "$dst_sz2" ] && rm -f -- "$src"
+      if [ "$src_sz" = "$dst_sz2" ]; then
+        log_debug "  Checksum verify OK, removing source"
+        rm -f -- "$src"
+        MOVED_COUNT=$((MOVED_COUNT + 1))
+      else
+        log_warn "  Checksum verify failed, keeping source: $src"
+      fi
     fi
   fi
 done
+log_info "Warm/copy phase complete: $COPIED_COUNT copied"
+[ "$MOVED_COUNT" -gt 0 ] && log_info "  ($MOVED_COUNT moved - source deleted after verify)"
 
 # -------------------------------------------
 # Optional: Move watched items back (separate)
 # -------------------------------------------
-if [ "$(to_bool "${PLEXCACHE_MOVE_WATCHED_BACK:-false}")" = "1" ]; then
-  echo "[plexcache] move-back phase start"
-  BACK_LIST="$(python /opt/plexcache/selector_watched_back.py || true)"
+BACK_COUNT=0
+if [ "$MOVE_BACK" = "1" ]; then
+  log_info "Starting move-back phase (watched items)..."
+  BACK_LIST="$(python /opt/plexcache/selector_watched_back_sqlite.py 2>> "$LOG" || true)"
   for cache_src in $BACK_LIST; do
     [ -z "$cache_src" ] && continue
     array_dst="${cache_src/$CACHE_ROOT/$ARRAY_ROOT}"
     "${MKDIR_CMD[@]}" "$(dirname "$array_dst")"
 
-    echo "[back] ${RSYNC_CMD[*]} '$cache_src' '$array_dst'"
+    log_info "Move back: $(basename "$cache_src")"
+    log_debug "  $(echo "${RSYNC_CMD[*]}" | tr '\n' ' ') '$cache_src' '$array_dst'"
     "${RSYNC_CMD[@]}" "$cache_src" "$array_dst"
+    BACK_COUNT=$((BACK_COUNT + 1))
 
     if [ "$(to_bool "${PLEXCACHE_MOVE_BACK_SIDECARS:-true}")" = "1" ]; then
       base="${cache_src%.*}"
       for ext in srt ass sub nfo jpg png; do
         sc="${base}.${ext}"
-        [ -f "$sc" ] && "${RSYNC_CMD[@]}" "$sc" "${array_dst%/*}/"
+        if [ -f "$sc" ]; then
+          log_debug "  Move back sidecar: $(basename "$sc")"
+          "${RSYNC_CMD[@]}" "$sc" "${array_dst%/*}/"
+        fi
       done
     fi
 
     if [ "$DRY" != "1" ]; then
       s=$(stat -c%s "$cache_src" 2>/dev/null || stat -f%z "$cache_src")
       d=$(stat -c%s "$array_dst" 2>/dev/null || stat -f%z "$array_dst" || echo 0)
-      [ "$s" = "$d" ] && rm -f -- "$cache_src"
+      if [ "$s" = "$d" ]; then
+        log_debug "  Verify OK, removing cache copy"
+        rm -f -- "$cache_src"
+      else
+        log_warn "  Verify failed, keeping cache copy: $cache_src"
+      fi
     fi
   done
-  echo "[plexcache] move-back phase end"
+  log_info "Move-back phase complete: $BACK_COUNT items moved back to array"
 fi
 
-echo "[plexcache] run end   $(date)"
+# Output completion summary to log file only
+completion_summary "$COPIED_COUNT" "$MOVED_COUNT" "$BACK_COUNT" >> "$LOG"

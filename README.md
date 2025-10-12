@@ -27,17 +27,17 @@ This repo/packages a lightweight wrapper around the upstream project **bexem/Ple
 * [Scheduling](#scheduling)
 * [Permissions and ownership](#permissions-and-ownership)
 * [Logging](#logging)
+* [SQLite mode (all-users selector)](#sqlite-mode-all-users-selector)
 * [Build and restart helper](#build-and-restart-helper)
 * [Update workflow](#update-workflow)
 * [Troubleshooting](#troubleshooting)
-* [Roadmap (SQLite enhancement)](#roadmap-sqlite-enhancement)
 * [Credits and license](#credits-and-license)
 
 ---
 
 ## What this build does
 
-* Talks to Plex to gather **On Deck** and **Watchlist** lists for the main user (`PLEX_TOKEN`).
+* Reads Plex's SQLite database directly to gather **On Deck** items for **all users**.
 * Translates Plex media paths to Unraid host paths via `PLEX_PATH_MAP` (e.g. `/data=/mnt/user`).
 * For each selected media file:
 
@@ -54,30 +54,34 @@ This repo/packages a lightweight wrapper around the upstream project **bexem/Ple
 ## Architecture
 
 ```
-Plex (API)
+Plex (API or SQLite)
    │
-   ├─ selector.py                 # builds a newline list of source file paths (array paths)
-   ├─ selector_watched_back.py    # builds a list of watched items currently on cache
-   └─ run_once.sh                 # free-space plan → rsync warm/move → optional watched-back
+   ├─ selector_api.py                      # builds list via Plex API (single user token)
+   ├─ selector_sqlite.py                   # builds list via SQLite DB (all users)
+   ├─ selector_watched_back_api.py         # watched items via API
+   ├─ selector_watched_back_sqlite.py      # watched items via SQLite
+   └─ run_once.sh                          # free-space plan → rsync warm/move → optional watched-back
         ├─ safeguards: /mnt/user0 → /mnt/cache only
         ├─ PUID/PGID ownership
         ├─ sidecars
         └─ neat logs
 
-entrypoint.sh                     # sets up scheduling (daily time or cron) + pretty “next run” logs
-Dockerfile                        # pulls upstream, installs plexapi, drops our scripts
+entrypoint.sh                              # sets up scheduling (daily time or cron) + pretty "next run" logs
+Dockerfile                                 # installs dependencies and copies our selector scripts
 ```
 
-Upstream Python (`plexcache.py`) is **not** executed directly; we’re using selectors plus `rsync` to be Unraid-safe.
+**Two selector modes:**
+* **SQLite mode**: Reads Plex's database directly for **all users'** On Deck items (faster, no per-user tokens needed)
+
+We use custom selector scripts plus `rsync` for Unraid-safe cache warming and moving.
 
 ---
 
 ## Requirements
 
 * Unraid with Docker
-* Plex reachable from this container
-* A Plex token for your main user
-* Your Plex container’s library path mapping (to build `PLEX_PATH_MAP`), e.g. Plex uses `/data` → host `/mnt/user`
+* Access to your Plex Media Server's database directory
+* Your Plex container's library path mapping (to build `PLEX_PATH_MAP`), e.g. Plex uses `/data` → host `/mnt/user`
 
 ---
 
@@ -112,13 +116,12 @@ Add the container via **Unraid GUI → Docker → Add Container** using the temp
   * `/mnt/cache` → `/mnt/cache` (rw)
   * `/config` → `/mnt/user/appdata/plexcache/config`
   * `/logs` → `/mnt/user/appdata/plexcache/logs`
+  * **Required:** `/plexdb` → `/mnt/user/plex` (ro)
 * Variables (minimum):
 
-  * `PLEX_BASEURL=http://<plex-lan-ip>:32400`
-  * `PLEX_TOKEN=<your token>`
   * `PLEX_PATH_MAP=/data=/mnt/user`
   * `PUID=99` `PGID=100`
-  * `PLEXCACHE_ONDECK=true` `PLEXCACHE_WATCHLIST=true`
+  * `PLEXCACHE_ONDECK=true`
   * `PLEXCACHE_WARM_MOVE=true`
   * `PLEXCACHE_TIME=03:15`  (or set CRON instead)
 
@@ -146,15 +149,11 @@ Use the XML you’ve already validated (with `Description="..."` on each field).
 
 | Variable                           | Default           | Purpose                                                                                             |
 | ---------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------- |
-| `PLEX_BASEURL`                     | *(none)*          | Plex server URL, e.g. `http://192.168.1.10:32400`. Use LAN IP, not `localhost`.                     |
-| `PLEX_TOKEN`                       | *(none)*          | Plex token (main user). Find in Plex Web DevTools → Network (header `X-Plex-Token`).                |
 | `PLEX_PATH_MAP`                    | `/data=/mnt/user` | Translate Plex paths to Unraid host paths. Comma-separated mapping pairs (for now we use one pair). |
 | `PLEXCACHE_ONDECK`                 | `true`            | Include On Deck items.                                                                              |
-| `PLEXCACHE_ONDECK_COUNT`           | `40`              | Max On Deck items.                                                                                  |
-| `PLEXCACHE_WATCHLIST`              | `true`            | Include Watchlist (local only).                                                                     |
-| `PLEXCACHE_WATCHLIST_COUNT`        | `40`              | Max Watchlist items.                                                                                |
+| `PLEXCACHE_ONDECK_COUNT`           | `10`              | Max On Deck items per user.                                                                          |
 | `PLEX_LIBRARIES`                   | *(blank)*         | Comma list of library names to include. Blank = all.                                                |
-| `PLEXCACHE_MAX_ITEMS`              | `500`             | Hard cap after other filters.                                                                       |
+| `PLEXCACHE_MAX_ITEMS`              | `100`             | Hard cap for total items (across all users).                                                        |
 | `PLEXCACHE_ARRAY_ROOT`             | `/mnt/user0`      | Source root (array only). Mirrors Unraid Mover behavior.                                            |
 | `PLEXCACHE_CACHE_ROOT`             | `/mnt/cache`      | Destination cache root.                                                                             |
 | `PLEXCACHE_WARM_MOVE`              | `true`            | Copy to cache then delete array source after verify. Prevents duplicates.                           |
@@ -164,22 +163,25 @@ Use the XML you’ve already validated (with `Description="..."` on each field).
 | `PLEXCACHE_MOVE_BACK_SIDECARS`     | `true`            | Move sidecars together with the media on move-back.                                                 |
 | `PLEXCACHE_MIN_FREE_GB`            | `20`              | Leave at least this much free after the run.                                                        |
 | `PLEXCACHE_RESERVE_GB`             | `10`              | Extra never-touch buffer on top of MIN_FREE.                                                        |
-| `PLEXCACHE_TRIM_PLAN`              | `true`            | If the plan doesn’t fit, trim it; if `false`, abort instead.                                        |
-| `PLEXCACHE_TIME`                   | `03:15`           | Daily time scheduler (HH:MM). Leave blank if using CRON.                                            |
+| `PLEXCACHE_TRIM_PLAN`              | `true`            | If the plan doesn't fit, trim it; if `false`, abort instead.                                        |
+| `PLEXCACHE_TIME`                   | `03:15`           | Daily time scheduler (HH:MM). Leave blank if using CRON or RUN_IMMEDIATELY.                         |
 | `PLEXCACHE_CRON`                   | *(blank)*         | Cron expression alternative (e.g. `0 */2 * * *`).                                                   |
-| `PLEX_SSL_VERIFY`                  | `true`            | Set `false` for self-signed HTTPS.                                                                  |
+| `PLEXCACHE_RUN_IMMEDIATELY`        | `false`           | If `true`, run once immediately, wait for key press, then exit. Useful for testing.                 |
+| `PLEXCACHE_LOG_LEVEL`              | `info`            | Log verbosity: `error`, `warn`, `info`, or `debug`. Use `debug` for troubleshooting.                |
+| `PLEXCACHE_PLEXDB_PATH`            | `/plexdb`         | Container path to Plex database root (for SQLite mode). Bind mount to `/mnt/user/plex` or similar. |
 | `PUID`                             | `99`              | Owner UID (Unraid `nobody`).                                                                        |
 | `PGID`                             | `100`             | Group GID (Unraid `users`).                                                                         |
-| `RSYNC_DRY_RUN`                    | `false`           | If `true`, add `--dry-run` to rsync and don’t modify files.                                         |
+| `RSYNC_DRY_RUN`                    | `false`           | If `true`, add `--dry-run` to rsync and don't modify files.                                         |
 
 ---
 
 ## Scheduling
 
-* **Daily time**: set `PLEXCACHE_TIME=HH:MM`. The log prints “next run” and “sleeping until”.
-* **Cron**: set `PLEXCACHE_CRON` to a standard expression. We log the expression; BusyBox `crond` doesn’t expose next-run times.
+* **Daily time**: set `PLEXCACHE_TIME=HH:MM`. The log prints "next run" and "sleeping until".
+* **Cron**: set `PLEXCACHE_CRON` to a standard expression. We log the expression; BusyBox `crond` doesn't expose next-run times.
+* **Run immediately** (testing/debug): set `PLEXCACHE_RUN_IMMEDIATELY=true`. Executes once, waits for key press, then exits. Perfect for testing changes.
 
-Only set one of these.
+Only set one of these scheduling methods.
 
 ---
 
@@ -190,17 +192,6 @@ We honor `PUID`/`PGID`:
 * Directories created with `install -d -m 0775 -o $PUID -g $PGID`
 * `rsync` uses `--chown=$PUID:$PGID`
 * Default matches Unraid (`nobody:users` → `99:100`)
-
----
-
-## Logging
-
-* All stdout/stderr is **tee’d** to `/logs/plexcache.log`.
-* Start of run, free-space plan, copy/skip decisions, and the optional move-back phase are logged.
-* Scheduler lines at container start:
-
-  * Daily: `scheduler: daily at 03:15` + `next run: …`
-  * Cron: `scheduler: cron '…'`
 
 ---
 
@@ -269,36 +260,83 @@ chmod +x /mnt/user/appdata/plexcache/build/build-and-restart.sh
 * **Bridge vs Host**
   Bridge is fine (no inbound ports). Host not required.
 
+* **Testing changes: Run Immediately mode**
+  Set `PLEXCACHE_RUN_IMMEDIATELY=true` temporarily in your template. The container will execute once, show results, wait for you to press a key in the console, then exit. Great for testing selector changes or dry runs.
+
+* **SQLite mode: "Plex database not found"**
+  Ensure the `/plexdb` mount is correct and points to your Plex appdata root (e.g., `/mnt/user/plex` or `/mnt/user/appdata/plex`).
+  The selector looks for `Library/Application Support/Plex Media Server/...` under that mount.
+  Check the mount in the container: `docker exec <container> ls -la /plexdb/Library`
+
+* **SQLite mode: No items found**
+  Check that users have On Deck items or Watchlist entries in Plex. Also verify `PLEX_PATH_MAP` is correct for translating database paths to host paths.
+
 ---
 
-## Roadmap (SQLite enhancement)
+## Logging
 
-Upstream supports richer selection (per-user tokens, filters, sessions) we’ve intentionally deferred. A next step is to **read Plex’s SQLite database locally** (read-only) for:
+* All stdout/stderr is **tee'd** to `/logs/plexcache.log`.
+* **Log levels** (set via `PLEXCACHE_LOG_LEVEL`):
+  * `error` - Only errors
+  * `warn` - Warnings and errors
+  * `info` (default) - High-level progress: start/end, summaries, file counts
+  * `debug` - Verbose details: every file, rsync commands, skip reasons
+* Scheduler lines at container start:
 
-* True **all-users On Deck** without collecting per-user tokens
-* Faster queries and richer filters (age, play state, last viewed)
-* Exact file paths without extra API calls
+  * Daily: `scheduler: daily at 03:15` + `next run: …`
+  * Cron: `scheduler: cron '…'`
 
-Plan:
+---
 
-1. Add an optional `/plexdb` bind mount to Plex’s database path (read-only).
-2. Implement `selector_sqlite.py` that queries the DB:
+## SQLite selector mode
 
-   * Map metadata to media parts and on-disk paths
-   * Respect `PLEX_PATH_MAP`
-   * Expose selection flags similar to today’s envs
-3. Gate it behind `PLEXCACHE_SELECTOR=sqlite|api` with `api` as default.
+This build uses **SQLite mode** exclusively, reading Plex's database directly to gather On Deck items from **all users**.
 
-This README plus the current scripts provide enough context for a new assistant to implement that cleanly.
+### Why SQLite mode?
+
+* **All-users On Deck**: Reads from every user on your Plex server
+* **No token required**: Direct database access, no API authentication needed
+* **Faster**: Direct database queries skip API overhead
+* **More reliable**: No network authentication issues
+
+### Setup
+
+1. **Mount Plex's database directory** (read-only recommended):
+
+   In Unraid Docker template, add a path mapping:
+   ```
+   Container Path: /plexdb
+   Host Path:      /mnt/user/plex     (or wherever your Plex appdata lives)
+   Access Mode:    Read Only
+   ```
+
+   The container expects:
+   ```
+   /plexdb/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db
+   ```
+
+   If your Plex appdata is at `/mnt/user/appdata/plex/`, mount that to `/plexdb` and the selector will find `Library/...` underneath.
+
+2. **Optional**: Adjust `PLEXCACHE_PLEXDB_PATH` if your mount point differs (default: `/plexdb`).
+
+3. **Apply** and check logs. You should see SQLite selector running for all users in the output.
+
+### Compatibility notes
+
+* **Feature parity**: SQLite mode supports the same filters as the original API mode (On Deck, library filters, max items).
+* **All users**: Unlike API mode which only covered one user, SQLite mode covers all users on your Plex server.
+* **Database schema**: Uses standard Plex tables (`metadata_items`, `media_parts`, `metadata_item_views`, `accounts`). Should be stable across Plex updates, but test after major Plex upgrades.
+
+If the database isn't found or queries fail, the selector exits with an error. The container will log the issue.
 
 ---
 
 ## Credits and license
 
-* **Upstream:** [bexem/PlexCache](https://github.com/bexem/PlexCache) — original idea and Python script to warm cache based on Plex metadata.
-* **This wrapper:** Unraid-specific containerization, selectors, and rsync-based warm/move logic.
+* **Inspiration:** [bexem/PlexCache](https://github.com/bexem/PlexCache) — original idea to warm cache based on Plex metadata.
+* **This implementation:** Unraid-specific containerization with custom selectors and rsync-based warm/move logic.
 
-Upstream licensing applies to upstream code. Wrapper scripts and Docker assets should follow a compatible permissive license (e.g. MIT) — include a LICENSE file mirroring upstream compatibility when you publish.
+We use the same Python dependencies (`plexapi`, `requests`) as the upstream project but implement our own selector-based architecture optimized for Unraid.
 
 ---
 
