@@ -329,36 +329,62 @@ if [ "$MOVE_BACK" = "1" ]; then
   if [ "$(to_bool "${PLEXCACHE_MOVE_BACK_SIDECARS:-true}")" = "1" ]; then
     log_info "Checking for orphaned sidecar files on cache..."
     ORPHAN_COUNT=0
-    for ext in srt ass sub nfo jpg png; do
-      while IFS= read -r -d '' sidecar; do
-        # Check if corresponding video file exists on cache
-        base="${sidecar%.*}"
-        video_exists=0
-        for vext in mkv mp4 avi m4v; do
-          if [ -f "${base}.${vext}" ]; then
-            video_exists=1
-            break
+    
+    # Build list of video library paths on cache to search
+    # Use the library names from PLEX_LIBRARIES if set, otherwise search common paths
+    SEARCH_PATHS=()
+    if [ -n "${PLEX_LIBRARIES:-}" ]; then
+      IFS=',' read -ra LIBS <<< "$PLEX_LIBRARIES"
+      for lib in "${LIBS[@]}"; do
+        lib_trimmed="$(echo "$lib" | xargs)"  # trim whitespace
+        # Common Plex library path patterns
+        for base_path in "video/$lib_trimmed" "$lib_trimmed"; do
+          search_path="${CACHE_ROOT}/${base_path}"
+          if [ -d "$search_path" ]; then
+            SEARCH_PATHS+=("$search_path")
           fi
         done
-        
-        # If no video file, this sidecar is orphaned - move it back
-        if [ "$video_exists" = "0" ]; then
-          array_sidecar="${sidecar/$CACHE_ROOT/$ARRAY_ROOT}"
-          if [ "$DRY" = "1" ]; then
-            log_info "Would move orphaned sidecar: $(basename "$sidecar")"
-          else
-            log_debug "Moving orphaned sidecar: $(basename "$sidecar") -> $array_sidecar"
-            array_dir="$(dirname "$array_sidecar")"
-            mkdir -p "$array_dir"
-            chown -R ${PUID}:${PGID} "$array_dir"
-            chmod -R 775 "$array_dir"
-            "${RSYNC_CMD[@]}" "$sidecar" "$array_sidecar" && rm -f -- "$sidecar"
-            ORPHAN_COUNT=$((ORPHAN_COUNT + 1))
-          fi
-        fi
-      done < <(find "$CACHE_ROOT" -type f -name "*.${ext}" -print0 2>/dev/null || true)
-    done
-    [ "$ORPHAN_COUNT" -gt 0 ] && log_info "Moved $ORPHAN_COUNT orphaned sidecar files back to array"
+      done
+    fi
+    
+    # If no libraries configured or paths not found, skip orphan cleanup
+    if [ ${#SEARCH_PATHS[@]} -eq 0 ]; then
+      log_debug "No video library paths found on cache, skipping orphan sidecar cleanup"
+    else
+      for search_path in "${SEARCH_PATHS[@]}"; do
+        log_debug "Searching for orphaned sidecars in: $search_path"
+        for ext in srt ass sub nfo jpg png; do
+          while IFS= read -r -d '' sidecar; do
+            # Check if corresponding video file exists on cache
+            base="${sidecar%.*}"
+            video_exists=0
+            for vext in mkv mp4 avi m4v; do
+              if [ -f "${base}.${vext}" ]; then
+                video_exists=1
+                break
+              fi
+            done
+            
+            # If no video file, this sidecar is orphaned - move it back
+            if [ "$video_exists" = "0" ]; then
+              array_sidecar="${sidecar/$CACHE_ROOT/$ARRAY_ROOT}"
+              if [ "$DRY" = "1" ]; then
+                log_info "Would move orphaned sidecar: $(basename "$sidecar")"
+              else
+                log_debug "Moving orphaned sidecar: $(basename "$sidecar")"
+                array_dir="$(dirname "$array_sidecar")"
+                mkdir -p "$array_dir"
+                chown -R ${PUID}:${PGID} "$array_dir"
+                chmod -R 775 "$array_dir"
+                "${RSYNC_CMD[@]}" "$sidecar" "$array_sidecar" && rm -f -- "$sidecar"
+                ORPHAN_COUNT=$((ORPHAN_COUNT + 1))
+              fi
+            fi
+          done < <(find "$search_path" -type f -name "*.${ext}" -print0 2>/dev/null || true)
+        done
+      done
+      [ "$ORPHAN_COUNT" -gt 0 ] && log_info "Moved $ORPHAN_COUNT orphaned sidecar files back to array"
+    fi
   fi
 fi
 
