@@ -10,6 +10,14 @@ from typing import List, Set, Tuple
 
 # ---------- helpers ----------
 
+def should_debug():
+    log_level = os.environ.get("PLEXCACHE_LOG_LEVEL", "info").lower()
+    return log_level == "debug"
+
+def debug_print(*args, **kwargs):
+    if should_debug():
+        print(*args, **kwargs)
+
 def env_bool(key: str, default: bool = False) -> bool:
     v = os.environ.get(key, "")
     if v == "" and default is not None:
@@ -75,7 +83,7 @@ def get_ondeck_items(db_path: str, max_per_user: int, include_libs: Set[str], on
         # Test basic connection
         cursor.execute("SELECT COUNT(*) FROM metadata_items")
         item_count = cursor.fetchone()[0]
-        print(f"[DEBUG] Connected to database, found {item_count} metadata items", file=sys.stderr)
+        debug_print(f"[DEBUG] Connected to database, found {item_count} metadata items", file=sys.stderr)
         
         # Get all user accounts, ordered by most recent activity (most active users first)
         cursor.execute("""
@@ -89,7 +97,7 @@ def get_ondeck_items(db_path: str, max_per_user: int, include_libs: Set[str], on
         account_rows = cursor.fetchall()
         account_ids = [row[0] for row in account_rows]
         account_names = {row[0]: row[1] for row in account_rows}
-        print(f"[DEBUG] Found {len(account_ids)} accounts, ordered by most recent activity", file=sys.stderr)
+        debug_print(f"[DEBUG] Found {len(account_ids)} accounts, ordered by most recent activity", file=sys.stderr)
         
         if not account_ids:
             # Fallback to admin account (id=1) if no accounts found
@@ -98,7 +106,7 @@ def get_ondeck_items(db_path: str, max_per_user: int, include_libs: Set[str], on
         for account_id in account_ids:
             # Stop if we've already collected enough items
             if len(results) >= max_per_user * 20:  # Reasonable upper limit to avoid over-querying
-                print(f"[DEBUG] Reached item limit, stopping at {len(results)} items from On Deck", file=sys.stderr)
+                debug_print(f"[DEBUG] Reached item limit, stopping at {len(results)} items from On Deck", file=sys.stderr)
                 break
             
             # Query for On Deck items per user - match Plex's "Continue Watching" logic
@@ -187,7 +195,7 @@ def get_ondeck_items(db_path: str, max_per_user: int, include_libs: Set[str], on
             rows = cursor.fetchall()
             account_name = account_names.get(account_id, f"ID:{account_id}")
             if rows:
-                print(f"[DEBUG] Adding {len(rows)} On Deck items for user: {account_name}", file=sys.stderr)
+                debug_print(f"[DEBUG] Adding {len(rows)} On Deck items for user: {account_name}", file=sys.stderr)
             
             for row in rows:
                 library_name = row['library_name']
@@ -210,14 +218,14 @@ def get_ondeck_items(db_path: str, max_per_user: int, include_libs: Set[str], on
                 # Log individual files with context
                 if item_type == 'partial_episode':
                     season_str = f"S{season_number}" if season_number else "S?"
-                    print(f"[DEBUG]   - {title} ({season_str}E{episode_index}, partial) - {file_path}", file=sys.stderr)
+                    debug_print(f"[DEBUG]   - {title} ({season_str}E{episode_index}, partial) - {file_path}", file=sys.stderr)
                 elif item_type == 'next_episode':
                     season_str = f"S{season_number}" if season_number else "S?"
-                    print(f"[DEBUG]   - {title} ({season_str}E{episode_index}) - {file_path}", file=sys.stderr)
+                    debug_print(f"[DEBUG]   - {title} ({season_str}E{episode_index}) - {file_path}", file=sys.stderr)
                 elif item_type == 'partial_movie':
-                    print(f"[DEBUG]   - {title} (partial movie) - {file_path}", file=sys.stderr)
+                    debug_print(f"[DEBUG]   - {title} (partial movie) - {file_path}", file=sys.stderr)
                 else:
-                    print(f"[DEBUG]   - {title} (new movie) - {file_path}", file=sys.stderr)
+                    debug_print(f"[DEBUG]   - {title} (new movie) - {file_path}", file=sys.stderr)
         
     except Exception as e:
         print(f"[ERROR] On Deck error: {e}", file=sys.stderr)

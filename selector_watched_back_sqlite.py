@@ -11,6 +11,14 @@ from typing import List, Set
 
 # ---------- helpers ----------
 
+def should_debug():
+    log_level = os.environ.get("PLEXCACHE_LOG_LEVEL", "info").lower()
+    return log_level == "debug"
+
+def debug_print(*args, **kwargs):
+    if should_debug():
+        print(*args, **kwargs)
+
 def env_bool(key: str, default=False) -> bool:
     v = os.environ.get(key)
     if v is None:
@@ -51,8 +59,13 @@ def apply_path_map(path: str) -> str:
 def get_watched_items(db_path: str, include_libs: Set[str], only_libs: Set[str], 
                      min_age_days: int, cache_root: str, array_root: str) -> List[str]:
     """
-    Query watched items for all users that are currently on cache.
-    Returns list of cache file paths.
+    Query items that should be moved back from cache to array.
+    
+    Items are moved back if they are:
+    1. Currently on cache
+    2. NOT in anyone's Continue Watching (not in progress, not next episode)
+    
+    Strategy: Find all items on cache, exclude items that are in Continue Watching.
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -67,29 +80,46 @@ def get_watched_items(db_path: str, include_libs: Set[str], only_libs: Set[str],
             cutoff_time = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=min_age_days)
             cutoff_timestamp = int(cutoff_time.timestamp())
         
-        # Query watched items across all users
-        # An item is "watched" if ANY user has watched it (viewed_at IS NOT NULL)
+        # Find items that are NOT in anyone's Continue Watching
+        # Items in Continue Watching are: partial episodes/movies OR next unwatched episodes
+        # Move back items that are fully watched and not "up next"
         query = """
         SELECT DISTINCT
             mi.id as metadata_id,
             mi.title,
             ls.name as library_name,
-            mp.file as file_path,
-            MAX(miv.viewed_at) as last_viewed_at
+            mp.file as file_path
         FROM metadata_items mi
-        JOIN metadata_item_views miv ON mi.guid = miv.guid
         JOIN library_sections ls ON mi.library_section_id = ls.id
         JOIN media_items med ON mi.id = med.metadata_item_id
         JOIN media_parts mp ON med.id = mp.media_item_id
-        WHERE miv.viewed_at IS NOT NULL
-            AND mp.file IS NOT NULL
-            AND mi.metadata_type IN (1, 4)  -- 1=Movie, 4=Episode
-        GROUP BY mi.id, mp.file
+        WHERE mp.file IS NOT NULL
+            AND mi.metadata_type IN (1, 4)
+            -- Exclude if ANY user has this item in progress (view_offset > 0)
+            AND mi.id NOT IN (
+                SELECT DISTINCT mi2.id
+                FROM metadata_items mi2
+                LEFT JOIN metadata_item_settings mis ON mi2.guid = mis.guid
+                WHERE COALESCE(mis.view_offset, 0) > 0
+            )
+            -- Exclude if this is a next unwatched episode for ANY user
+            AND mi.id NOT IN (
+                SELECT DISTINCT mi3.id
+                FROM metadata_items mi3
+                LEFT JOIN metadata_item_views miv3 ON mi3.guid = miv3.guid
+                WHERE mi3.metadata_type = 4
+                    AND miv3.account_id IS NOT NULL
+                    AND miv3.viewed_at IS NULL
+                    AND mi3.parent_id IN (
+                        SELECT DISTINCT mi4.parent_id
+                        FROM metadata_items mi4
+                        LEFT JOIN metadata_item_views miv4 ON mi4.guid = miv4.guid
+                        WHERE mi4.metadata_type = 4 
+                            AND miv4.viewed_at IS NOT NULL
+                            AND miv4.account_id = miv3.account_id
+                    )
+            )
         """
-        
-        # Add age filter if specified
-        if cutoff_timestamp:
-            query += f" HAVING last_viewed_at < {cutoff_timestamp}"
         
         cursor.execute(query)
         
@@ -107,23 +137,25 @@ def get_watched_items(db_path: str, include_libs: Set[str], only_libs: Set[str],
             # Map to host path
             host_path = apply_path_map(file_path)
             
-            # Check if file exists on cache
-            # Try multiple possible cache paths
+            # Only process items that are actually on cache
+            # The file path from Plex database points to the array location
+            # We need to check if there's a corresponding file on cache
             cache_root_clean = cache_root.rstrip("/")
             array_root_clean = array_root.rstrip("/")
             
-            candidates = []
-            if host_path.startswith(cache_root_clean + "/"):
-                candidates.append(host_path)
+            # Convert array path to cache path
+            cache_path = None
             if host_path.startswith(array_root_clean + "/"):
-                candidates.append(host_path.replace(array_root_clean, cache_root_clean, 1))
-            if host_path.startswith("/mnt/user/"):
-                candidates.append(host_path.replace("/mnt/user", cache_root_clean, 1))
+                cache_path = host_path.replace(array_root_clean, cache_root_clean, 1)
+            elif host_path.startswith("/mnt/user/"):
+                cache_path = host_path.replace("/mnt/user", cache_root_clean, 1)
+            elif host_path.startswith(cache_root_clean + "/"):
+                # Already on cache
+                cache_path = host_path
             
-            # Find first existing cache file
-            cache_src = next((c for c in candidates if c.startswith(cache_root_clean + "/") and os.path.isfile(c)), None)
-            if cache_src:
-                results.append(cache_src)
+            # Only add if the cache file actually exists
+            if cache_path and os.path.isfile(cache_path):
+                results.append(cache_path)
         
     except Exception as e:
         print(f"[ERROR] Watched items query error: {e}", file=sys.stderr)
