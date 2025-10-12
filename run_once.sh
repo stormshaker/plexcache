@@ -324,6 +324,42 @@ if [ "$MOVE_BACK" = "1" ]; then
     fi
   done
   log_info "Move-back phase complete: $BACK_COUNT items moved back to array"
+  
+  # Clean up orphaned sidecar files (main video already moved back but sidecars left behind)
+  if [ "$(to_bool "${PLEXCACHE_MOVE_BACK_SIDECARS:-true}")" = "1" ]; then
+    log_info "Checking for orphaned sidecar files on cache..."
+    ORPHAN_COUNT=0
+    for ext in srt ass sub nfo jpg png; do
+      while IFS= read -r -d '' sidecar; do
+        # Check if corresponding video file exists on cache
+        base="${sidecar%.*}"
+        video_exists=0
+        for vext in mkv mp4 avi m4v; do
+          if [ -f "${base}.${vext}" ]; then
+            video_exists=1
+            break
+          fi
+        done
+        
+        # If no video file, this sidecar is orphaned - move it back
+        if [ "$video_exists" = "0" ]; then
+          array_sidecar="${sidecar/$CACHE_ROOT/$ARRAY_ROOT}"
+          if [ "$DRY" = "1" ]; then
+            log_info "Would move orphaned sidecar: $(basename "$sidecar")"
+          else
+            log_debug "Moving orphaned sidecar: $(basename "$sidecar") -> $array_sidecar"
+            array_dir="$(dirname "$array_sidecar")"
+            mkdir -p "$array_dir"
+            chown -R ${PUID}:${PGID} "$array_dir"
+            chmod -R 775 "$array_dir"
+            "${RSYNC_CMD[@]}" "$sidecar" "$array_sidecar" && rm -f -- "$sidecar"
+            ORPHAN_COUNT=$((ORPHAN_COUNT + 1))
+          fi
+        fi
+      done < <(find "$CACHE_ROOT" -type f -name "*.${ext}" -print0 2>/dev/null || true)
+    done
+    [ "$ORPHAN_COUNT" -gt 0 ] && log_info "Moved $ORPHAN_COUNT orphaned sidecar files back to array"
+  fi
 fi
 
 # Output completion summary to log file only
