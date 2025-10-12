@@ -102,21 +102,34 @@ def get_watched_items(db_path: str, include_libs: Set[str], only_libs: Set[str],
                 LEFT JOIN metadata_item_settings mis ON mi2.guid = mis.guid
                 WHERE COALESCE(mis.view_offset, 0) > 0
             )
-            -- Exclude if this is a next unwatched episode for ANY user
+            -- Exclude if this is a next unwatched episode in a started season for ANY user
             AND mi.id NOT IN (
-                SELECT DISTINCT mi3.id
-                FROM metadata_items mi3
-                LEFT JOIN metadata_item_views miv3 ON mi3.guid = miv3.guid
-                WHERE mi3.metadata_type = 4
-                    AND miv3.account_id IS NOT NULL
-                    AND miv3.viewed_at IS NULL
-                    AND mi3.parent_id IN (
-                        SELECT DISTINCT mi4.parent_id
-                        FROM metadata_items mi4
-                        LEFT JOIN metadata_item_views miv4 ON mi4.guid = miv4.guid
-                        WHERE mi4.metadata_type = 4 
-                            AND miv4.viewed_at IS NOT NULL
-                            AND miv4.account_id = miv3.account_id
+                SELECT DISTINCT unwatched_ep.id
+                FROM metadata_items unwatched_ep
+                WHERE unwatched_ep.metadata_type = 4
+                    AND unwatched_ep.parent_id IN (
+                        -- Find seasons where ANY user has watched at least one episode
+                        SELECT DISTINCT watched_ep.parent_id
+                        FROM metadata_items watched_ep
+                        JOIN metadata_item_views watched_view ON watched_ep.guid = watched_view.guid
+                        WHERE watched_ep.metadata_type = 4
+                            AND watched_view.viewed_at IS NOT NULL
+                    )
+                    -- And this episode hasn't been watched by ALL users who have watched other episodes in this season
+                    AND EXISTS (
+                        SELECT 1
+                        FROM metadata_items sibling_ep
+                        JOIN metadata_item_views sibling_view ON sibling_ep.guid = sibling_view.guid
+                        WHERE sibling_ep.parent_id = unwatched_ep.parent_id
+                            AND sibling_ep.metadata_type = 4
+                            AND sibling_view.viewed_at IS NOT NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM metadata_item_views unwatched_view
+                                WHERE unwatched_view.guid = unwatched_ep.guid
+                                    AND unwatched_view.account_id = sibling_view.account_id
+                                    AND unwatched_view.viewed_at IS NOT NULL
+                            )
                     )
             )
         """
