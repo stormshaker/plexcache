@@ -1,7 +1,3 @@
-Here’s a clean, drop-in **README.md** for this build. It documents what we’ve done, credits upstream, and has enough detail for someone new (or a fresh ChatGPT instance) to continue from here, including the SQLite idea.
-
----
-
 # PlexCache for Unraid (containerized wrapper)
 
 Warm your Unraid cache with Plex “On Deck” and Watchlist items. Optionally move watched items back to the array. Safe, Unraid-specific paths. No symlink tricks. Minimal knobs, sensible defaults.
