@@ -21,7 +21,41 @@ say_when () {
     echo "[plexcache] scheduler: run immediately (one-shot mode)"
   elif [ -n "${PLEXCACHE_CRON:-}" ]; then
     echo "[plexcache] scheduler: cron '${PLEXCACHE_CRON}' (busybox crond)"
-    echo "[plexcache] note: next-run calculation not available from crond; run 'docker logs -f' to watch executions."
+    
+    # Calculate next run time for common cron patterns
+    next_run=""
+    read -r minute hour day month weekday <<< "${PLEXCACHE_CRON}"
+    
+    # Handle simple patterns
+    if [[ "$minute" =~ ^[0-9]+$ ]] && [[ "$hour" =~ ^[0-9]+$ ]] && [[ "$day" == "*" ]] && [[ "$month" == "*" ]] && [[ "$weekday" == "*" ]]; then
+      # Fixed time daily (e.g., "0 3 * * *")
+      now=$(date +%s)
+      next=$(date -d "$(date -d @$now +%F) $hour:$minute" +%s 2>/dev/null || echo $((now+86400)))
+      [ "$next" -le "$now" ] && next=$(date -d "tomorrow $hour:$minute" +%s 2>/dev/null || echo $((now+86400)))
+      next_run=$(date -d @$next +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "unknown")
+    elif [[ "$minute" =~ ^[0-9]+$ ]] && [[ "$hour" =~ ^\*/[0-9]+$ ]] && [[ "$day" == "*" ]] && [[ "$month" == "*" ]] && [[ "$weekday" == "*" ]]; then
+      # Every N hours (e.g., "0 */4 * * *")
+      interval="${hour#*/}"
+      now=$(date +%s)
+      current_hour=$(date -d @$now +%H)
+      # Remove leading zeros to avoid octal interpretation
+      current_hour=$((10#$current_hour))
+      next_hour=$(( (current_hour / interval + 1) * interval ))
+      if [ $next_hour -ge 24 ]; then
+        next_hour=0
+        next_date=$(date -d "tomorrow" +%F)
+      else
+        next_date=$(date -d @$now +%F)
+      fi
+      next=$(date -d "$next_date $next_hour:$minute" +%s 2>/dev/null || echo $((now+3600)))
+      next_run=$(date -d @$next +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "unknown")
+    fi
+    
+    if [ -n "$next_run" ] && [ "$next_run" != "unknown" ]; then
+      echo "[plexcache] next run: $next_run"
+    else
+      echo "[plexcache] note: next-run calculation not available for this cron pattern; run 'docker logs -f' to watch executions."
+    fi
   elif [ -n "${PLEXCACHE_TIME:-}" ]; then
     # compute next run like the daily loop does
     TARGET="${PLEXCACHE_TIME:-03:15}"
@@ -81,8 +115,11 @@ fi
 # cron mode if PLEXCACHE_CRON is set
 if [ -n "${PLEXCACHE_CRON:-}" ]; then
   env | grep -E '^(PLEXCACHE|PLEX|TZ|PUID|PGID)=' > /etc/environment
-  echo "$PLEXCACHE_CRON /usr/local/bin/run_once.sh >> $PLEXCACHE_LOG 2>&1" > /etc/crontabs/root
-  exec busybox crond -f -l 2
+  CRON_DIR="/etc/crontabs"
+  [ -d "$CRON_DIR" ] || CRON_DIR="/var/spool/cron/crontabs"
+  mkdir -p "$CRON_DIR"
+  echo "$PLEXCACHE_CRON . /etc/environment; /usr/local/bin/run_once.sh >> $PLEXCACHE_LOG 2>&1" > "$CRON_DIR/root"
+  exec busybox crond -f -l 2 -c "$CRON_DIR"
 fi
 
 # daily time mode like Kometa
