@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/plexcache
 
 # install python dependencies (only what we need for SQLite)
-RUN pip install --no-cache-dir requests
+RUN pip install --no-cache-dir requests croniter
 
 # our runtime helpers
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

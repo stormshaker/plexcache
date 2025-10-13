@@ -174,6 +174,11 @@ def get_watched_items(db_path: str, include_libs: Set[str], only_libs: Set[str],
                         )
                     )
             )
+            -- Exclude newly added movies (within last 30 days) from move-back
+            AND NOT (
+                mi.metadata_type = 1 
+                AND mi.added_at > (strftime('%s', 'now') - (30 * 24 * 60 * 60))
+            )
         """
         
         cursor.execute(query)

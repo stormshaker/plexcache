@@ -13,9 +13,15 @@ mkdir -p "$(dirname "$LOG")"
 # Rotate log on startup with timestamp
 if [ -f "$LOG" ]; then
     TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-    # Copy to timestamped backup and truncate original (preserves open file handles)
-    cp "$LOG" "${LOG}.${TIMESTAMP}"
-    > "$LOG"  # truncate the original file
+    # Move to timestamped backup (preserves original timestamps)
+    # Change /logs/plexcache.log to /logs/plexcache.20251014-031000.log
+    LOG_BASE="${LOG%.*}"  # Remove .log extension
+    mv "$LOG" "${LOG_BASE}.${TIMESTAMP}.log"
+    touch "$LOG"  # create new empty log file
+    
+    # Prune old log files - keep only the 12 newest
+    LOG_DIR="$(dirname "$LOG")"
+    find "$LOG_DIR" -name "$(basename "$LOG_BASE").*.log" -type f | sort -r | tail -n +13 | xargs -r rm -f
 fi
 
 to_bool() {
@@ -41,35 +47,7 @@ log_warn()  { [ "$LOG_LEVEL_NUM" -ge 1 ] && echo "[WARN] $*" >> "$LOG" || true; 
 log_info()  { [ "$LOG_LEVEL_NUM" -ge 2 ] && echo "[INFO] $*" >> "$LOG" || true; }
 log_debug() { [ "$LOG_LEVEL_NUM" -ge 3 ] && echo "[DEBUG] $*" >> "$LOG" || true; }
 
-# Startup summary function (can be called from entrypoint.sh too)
-startup_summary() {
-  echo "[plexcache] ==============================================="
-  echo "[plexcache] PlexCache run started: $(date)"
-  echo "[plexcache] Log level: ${LOG_LEVEL:-info}"
-  echo "[plexcache] Detailed logs: ${LOG:-/logs/plexcache.log}"
-  echo "[plexcache] Dry run: ${DRY:-0} | Move warm: ${WARM_MOVE:-1} | Move back: ${MOVE_BACK:-0}"
-  echo "[plexcache] Array: ${ARRAY_ROOT:-/mnt/user0} | Cache: ${CACHE_ROOT:-/mnt/cache}"
-  echo "[plexcache] ==============================================="
-}
-
-# Completion summary function (can be called from entrypoint.sh too)
-completion_summary() {
-  local copied_count="${1:-0}"
-  local moved_count="${2:-0}"
-  local back_count="${3:-0}"
-  
-  if [ "$back_count" -gt 0 ]; then
-    echo "[plexcache] Warm/copy phase complete: $copied_count copied"
-    echo "[plexcache] Move-back phase complete: $back_count items moved back to array"
-  elif [ "$moved_count" -gt 0 ]; then
-    echo "[plexcache] Warm/copy phase complete: $copied_count copied ($moved_count moved - source deleted after verify)"
-  else
-    echo "[plexcache] Warm/copy phase complete: $copied_count copied"
-  fi
-  echo "[plexcache] ==============================================="
-  echo "[plexcache] PlexCache run ended: $(date)"
-  echo "[plexcache] ==============================================="
-}
+# Note: startup_summary and completion_summary functions moved to entrypoint.sh
 
 DRY="$(to_bool "${RSYNC_DRY_RUN:-}")"
 WARM_MOVE="$(to_bool "${PLEXCACHE_WARM_MOVE:-true}")"             # <<— new: move during warm by default
@@ -77,8 +55,7 @@ WARM_SIDECARS="$(to_bool "${PLEXCACHE_WARM_SIDECARS:-true}")"     # <<— copy/m
 SKIP_IF_PLAYING_WARM="$(to_bool "${PLEXCACHE_SKIP_IF_PLAYING_WARM:-true}")"
 MOVE_BACK="$(to_bool "${PLEXCACHE_MOVE_WATCHED_BACK:-false}")"    # <<— move watched items back to array
 
-# Output startup summary to log file only
-startup_summary >> "$LOG"
+# Note: startup summary now handled by entrypoint.sh
 
 # base rsync cmd
 RSYNC_CMD=(rsync -ahvW --inplace --partial --numeric-ids --xattrs --acls)
@@ -428,5 +405,4 @@ for path in paths:
   fi
 fi
 
-# Output completion summary to log file only
-completion_summary "$COPIED_COUNT" "$MOVED_COUNT" "$BACK_COUNT" >> "$LOG"
+# Note: completion summary now handled by entrypoint.sh
