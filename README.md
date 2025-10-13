@@ -424,6 +424,18 @@ Potential features for future versions:
 
 ---
 
+## Implementation comments
+
+Personally, this was a good experience in learning how Docker containers are built, and my first time trying an almost fully
+'vibe-coded' project, using Cursor. That was simultaneously enlightening and quite frustrating, but hopefully the codebase
+is simple enough that it can be maintained by hand, later. A breakthrough was providing a backup copy of my Plex database to
+Cursor during development, so it could query away as much as it liked, to search for the right tables and columns.
+
+I'm considering renaming this project. Whereis it is effectively attempts similar outcomes as [bexem/PlexCache], it's a new
+codebase and not a fork. So, it probably needs a new identity.
+
+---
+
 ## Credits
 
 * **Inspiration:** [bexem/PlexCache](https://github.com/bexem/PlexCache) - original cache warming concept
