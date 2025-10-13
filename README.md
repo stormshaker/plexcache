@@ -431,8 +431,8 @@ Personally, this was a good experience in learning how Docker containers are bui
 is simple enough that it can be maintained by hand, later. A breakthrough was providing a backup copy of my Plex database to
 Cursor during development, so it could query away as much as it liked, to search for the right tables and columns.
 
-I'm considering renaming this project. Whereis it is effectively attempts similar outcomes as [bexem/PlexCache], it's a new
-codebase and not a fork. So, it probably needs a new identity.
+I'm considering renaming this project. Whereis it is effectively attempts similar outcomes as
+[bexem/PlexCache](https://github.com/bexem/PlexCache), it's a new codebase and not a fork. So, it probably needs a new identity.
 
 ---
 
