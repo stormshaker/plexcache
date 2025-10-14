@@ -61,60 +61,16 @@ say_when () {
 }
 
 # ---- unified run execution ----
-execute_plexcache_run () {
-  # Show startup summary
-  echo "[plexcache] ==============================================="
-  echo "[plexcache] PlexCache run started: $(date)"
-  echo "[plexcache] Log level: ${PLEXCACHE_LOG_LEVEL:-info}"
-  echo "[plexcache] Detailed logs: ${PLEXCACHE_LOG:-/logs/plexcache.log}"
-  echo "[plexcache] Dry run: ${RSYNC_DRY_RUN:-0} | Move warm: ${PLEXCACHE_WARM_MOVE:-1} | Move back: ${PLEXCACHE_MOVE_WATCHED_BACK:-0}"
-  echo "[plexcache] Array: ${PLEXCACHE_ARRAY_ROOT:-/mnt/user0} | Cache: ${PLEXCACHE_CACHE_ROOT:-/mnt/cache}"
-  echo "[plexcache] ==============================================="
-  
-  # Run the script (output goes to log file)
-  /usr/local/bin/run_once.sh >> "$PLEXCACHE_LOG" 2>&1
-  
-  # Show completion summary (parse from log file)
-  if [ -f "$PLEXCACHE_LOG" ]; then
-    copied_count=$(tail -20 "$PLEXCACHE_LOG" | grep "Warm/copy phase complete" | tail -1 | sed 's/.*: \([0-9]*\) copied.*/\1/' || echo "0")
-    back_count=$(tail -20 "$PLEXCACHE_LOG" | grep "Move-back phase complete" | tail -1 | sed 's/.*: \([0-9]*\) items moved.*/\1/' || echo "0")
-    moved_count=$(tail -20 "$PLEXCACHE_LOG" | grep "moved - source deleted" | tail -1 | sed 's/.*(\([0-9]*\) moved.*/\1/' || echo "0")
-    
-    # Ensure variables are numbers (default to 0 if empty)
-    copied_count=${copied_count:-0}
-    back_count=${back_count:-0}
-    moved_count=${moved_count:-0}
-    
-    # Check if move-back is enabled
-    MOVE_BACK_ENABLED="$(to_bool "${PLEXCACHE_MOVE_WATCHED_BACK:-false}")"
-    
-    if [ "$MOVE_BACK_ENABLED" = "1" ]; then
-      # Move-back is enabled, always show both phases
-      if [ "$moved_count" -gt 0 ]; then
-        echo "[plexcache] Warm/copy phase complete: $copied_count copied ($moved_count moved - source deleted after verify)"
-      else
-        echo "[plexcache] Warm/copy phase complete: $copied_count copied"
-      fi
-      echo "[plexcache] Move-back phase complete: $back_count items moved back to array"
-    else
-      # Move-back is disabled, only show warm/copy phase
-      if [ "$moved_count" -gt 0 ]; then
-        echo "[plexcache] Warm/copy phase complete: $copied_count copied ($moved_count moved - source deleted after verify)"
-      else
-        echo "[plexcache] Warm/copy phase complete: $copied_count copied"
-      fi
-    fi
-    echo "[plexcache] ==============================================="
-    echo "[plexcache] PlexCache run ended: $(date)"
-    echo "[plexcache] ==============================================="
-  fi
-}
 
 say_when
 
 # run immediately mode (like Kometa) - execute once, wait for input, exit
 if [ "${PLEXCACHE_RUN_IMMEDIATELY:-false}" = "true" ]; then
   echo "[plexcache] Running immediately (one-shot mode)..."
+  # Source the functions file to access execute_plexcache_run
+  if [ -f "/usr/local/bin/plexcache_functions.sh" ]; then
+    . /usr/local/bin/plexcache_functions.sh
+  fi
   execute_plexcache_run
   echo ""
   echo "[plexcache] Run complete. Press any key to exit..."
@@ -164,13 +120,13 @@ execute_plexcache_run () {
   echo "[plexcache] Detailed logs: ${PLEXCACHE_LOG:-/logs/plexcache.log}"
   echo "[plexcache] Dry run: ${RSYNC_DRY_RUN:-0} | Move warm: ${PLEXCACHE_WARM_MOVE:-1} | Move back: ${PLEXCACHE_MOVE_WATCHED_BACK:-0}"
   echo "[plexcache] Array: ${PLEXCACHE_ARRAY_ROOT:-/mnt/user0} | Cache: ${PLEXCACHE_CACHE_ROOT:-/mnt/cache}"
-  echo "[plexcache] ==============================================="
   
   # Run the script (output goes to log file)
   /usr/local/bin/run_once.sh >> "$PLEXCACHE_LOG" 2>&1
   
   # Show completion summary (parse from log file)
   if [ -f "$PLEXCACHE_LOG" ]; then
+    echo "[plexcache] -------------------------------------------------"
     copied_count=$(tail -20 "$PLEXCACHE_LOG" | grep "Warm/copy phase complete" | tail -1 | sed 's/.*: \([0-9]*\) copied.*/\1/' || echo "0")
     back_count=$(tail -20 "$PLEXCACHE_LOG" | grep "Move-back phase complete" | tail -1 | sed 's/.*: \([0-9]*\) items moved.*/\1/' || echo "0")
     moved_count=$(tail -20 "$PLEXCACHE_LOG" | grep "moved - source deleted" | tail -1 | sed 's/.*(\([0-9]*\) moved.*/\1/' || echo "0")
@@ -199,18 +155,21 @@ execute_plexcache_run () {
         echo "[plexcache] Warm/copy phase complete: $copied_count copied"
       fi
     fi
-    echo "[plexcache] ==============================================="
+    echo "[plexcache] -------------------------------------------------"
     echo "[plexcache] PlexCache run ended: $(date)"
     
     # Show next run time if cron is enabled
-    next_run=$(get_next_run_time)
-    if [ "$next_run" != "unknown" ] && [ -n "$next_run" ]; then
-      echo "[plexcache] next run: $next_run"
+    if [ -n "${PLEXCACHE_CRON:-}" ]; then
+      next_run=$(get_next_run_time)
+      if [ "$next_run" != "unknown" ] && [ -n "$next_run" ]; then
+        echo "[plexcache] next run: $next_run"
+      fi
     fi
     
     echo "[plexcache] ==============================================="
   fi
 }
+
 EOF
 
   # Create wrapper script that sources environment and runs main script
@@ -268,5 +227,9 @@ while true; do
   echo "[plexcache] sleeping until $(date -d @$next +'%Y-%m-%d %H:%M:%S %Z')"
   sleep $(( next - now ))
   
+  # Source the functions file to access execute_plexcache_run
+  if [ -f "/usr/local/bin/plexcache_functions.sh" ]; then
+    . /usr/local/bin/plexcache_functions.sh
+  fi
   execute_plexcache_run
 done
