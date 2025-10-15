@@ -58,7 +58,9 @@ MOVE_BACK="$(to_bool "${PLEXCACHE_MOVE_WATCHED_BACK:-false}")"    # <<— move w
 # Note: startup summary now handled by entrypoint.sh
 
 # base rsync cmd
-RSYNC_CMD=(rsync -ahvW --inplace --partial --numeric-ids --xattrs --acls)
+RSYNC_CMD=(rsync -ahW --inplace --partial --numeric-ids --xattrs --acls)
+# Add verbose flag only for debug level
+[ "$LOG_LEVEL_NUM" -ge 3 ] && RSYNC_CMD+=(-v)
 RSYNC_CMD+=(--chown=${PUID}:${PGID})
 [ "$DRY" = "1" ] && RSYNC_CMD+=(--dry-run)
 
@@ -231,7 +233,11 @@ for rec in "${PICKED[@]}"; do
     else
       # fall back to checksum pass once, then re-check
       log_debug "  Size mismatch, verifying with checksum"
-      rsync -ahvW --checksum "$src" "$dst"
+      if [ "$LOG_LEVEL_NUM" -ge 3 ]; then
+        rsync -ahvW --checksum "$src" "$dst"
+      else
+        rsync -ahW --checksum "$src" "$dst"
+      fi
       dst_sz2=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst" || echo 0)
       if [ "$src_sz" = "$dst_sz2" ]; then
         log_debug "  Checksum verify OK, removing source"
