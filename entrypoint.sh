@@ -114,7 +114,6 @@ except Exception as e:
 
 execute_plexcache_run () {
   # Show startup summary
-  echo "[plexcache] ==============================================="
   echo "[plexcache] PlexCache run started: $(date)"
   echo "[plexcache] Log level: ${PLEXCACHE_LOG_LEVEL:-info}"
   echo "[plexcache] Detailed logs: ${PLEXCACHE_LOG:-/logs/plexcache.log}"
